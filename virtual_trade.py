@@ -10,8 +10,9 @@ sys.path.insert(0, BASE)
 
 from features import engineer_features, TECHNICAL_FEATURES_DL, TECHNICAL_FEATURES
 from trainer import prepare_dl_panel, train_xgboost_models, train_model
-from config import STOCK_POOL, SECTOR_MAP, DEVICE
+from config import STOCK_POOL, SECTOR_MAP, DEVICE, CYCLE_CONFIG
 from backtest import DeepQuantBacktester
+from regime import detect_market_cycle, CycleController
 from feishu_pusher import FeishuPusher
 from datetime import datetime
 import torch
@@ -42,8 +43,9 @@ def _get_stock_price(code, loaded):
     return float(df['close'].iloc[-1])
 
 
-def _calculate_portfolio(selected_df, loaded):
+def _calculate_portfolio(selected_df, loaded, position_pct=1.0):
     """计算可购买持仓: 权重分配 → 整手约束 → 输出明细"""
+    effective_capital = INITIAL_CAPITAL * position_pct
     # 归一化权重 (按预测值比例)
     pred_vals = selected_df['Prediction'].values
     if pred_vals.sum() > 0:
@@ -66,7 +68,7 @@ def _calculate_portfolio(selected_df, loaded):
         daily_chg = (price / pre_close - 1) * 100 if pre_close > 0 else 0
 
         order_price = price * (1 + PRICE_TOLERANCE)
-        budget = INITIAL_CAPITAL * weight
+        budget = effective_capital * weight
         buy_cost_rate = COMMISSION + TRANSFER_FEE
 
         max_shares = int(budget / (order_price * LOT_SIZE)) * LOT_SIZE
@@ -97,7 +99,7 @@ def _calculate_portfolio(selected_df, loaded):
         total_cost += actual_cost
 
     portfolio = pd.DataFrame(rows)
-    cash_left = INITIAL_CAPITAL - total_cost
+    cash_left = effective_capital - total_cost
     return portfolio, cash_left
 
 
@@ -351,21 +353,36 @@ def generate_top_picks(panel, loaded, all_models, scaler, xgb_models, xgb_scaler
         else:
             last_day['Prediction'] = 0.0
 
-    # === 可购买性感知的Top K选股 ===
+    # === 市场周期感知的仓位管理 ===
     last_day['name'] = last_day['code'].map(SECTOR_MAP)
+
+    # 检测当前市场周期
+    cycle_raw = detect_market_cycle(market_df.loc[:last_dt])
+    cycle_cc = CycleController()
+    current_cycle = cycle_cc.update(last_dt, cycle_raw)
+    cycle_cfg = CYCLE_CONFIG.get(current_cycle, CYCLE_CONFIG['range'])
+
+    dynamic_top_k = cycle_cfg['top_n']
+    dynamic_pool = max(dynamic_top_k * 3, TOP_K * 2)  # 候选池至少为top_k的3倍
+    position_pct = cycle_cfg['position_pct']
+
+    print(f"\n  当前市场周期: [{current_cycle.upper()}] 仓位={position_pct*100:.0f}% TOP_K={dynamic_top_k}")
+
     selected_df = _select_affordable_topk(
-        last_day, loaded, top_k=TOP_K, candidate_pool=CANDIDATE_POOL
+        last_day, loaded, top_k=dynamic_top_k, candidate_pool=dynamic_pool
     )
 
-    # 计算实际持仓
-    portfolio, cash_left = _calculate_portfolio(selected_df, loaded)
+    # 计算实际持仓 (周期感知仓位)
+    portfolio, cash_left = _calculate_portfolio(selected_df, loaded, position_pct=position_pct)
 
-    return portfolio, selected_df, daily, last_dt, cash_left
+    return portfolio, selected_df, daily, last_dt, cash_left, current_cycle
 
 
-def push_to_feishu(portfolio, daily, last_dt, cash_left):
+def push_to_feishu(portfolio, daily, last_dt, cash_left, current_cycle='range'):
     """推送虚拟盘交易指令到飞书"""
     import numpy as np
+
+    cycle_cfg = CYCLE_CONFIG.get(current_cycle, CYCLE_CONFIG['range'])
 
     # 统计
     total_shares = portfolio['买入(股)'].astype(int).sum()
@@ -378,11 +395,13 @@ def push_to_feishu(portfolio, daily, last_dt, cash_left):
     strat_total = daily['Cum_Strategy'].iloc[-1] * 100
 
     # 构建消息
+    cycle_emoji = {'bull': '🐂', 'bear': '🐻', 'range': '➡️'}
     lines = []
     lines.append(f"**虚拟盘交易指令**")
     lines.append(f"**生成时间:** {datetime.now().strftime('%Y-%m-%d %H:%M')}")
     lines.append(f"**基准日:** {last_dt.date()}")
-    lines.append(f"**初始资金:** CNY {INITIAL_CAPITAL:,} | **选股:** Top {TOP_K}")
+    lines.append(f"**市场周期:** {cycle_emoji.get(current_cycle, '')} {current_cycle.upper()} | 仓位 {cycle_cfg['position_pct']*100:.0f}% | Top{cycle_cfg['top_n']}")
+    lines.append(f"**初始资金:** CNY {INITIAL_CAPITAL:,}")
     lines.append("")
     lines.append("---")
     lines.append("")
@@ -426,17 +445,20 @@ def push_to_feishu(portfolio, daily, last_dt, cash_left):
     print(f"\n  保存至: {csv_path}")
 
 
-def generate_thss_report(portfolio, selected_df, last_dt, cash_left):
+def generate_thss_report(portfolio, selected_df, last_dt, cash_left, current_cycle='range'):
     """
     生成同花顺模拟盘格式的交易指令报告
     格式: 股票代码 | 股票名称 | 操作 | 委托价格 | 委托数量 | 金额(元)
     """
+    cycle_cfg = CYCLE_CONFIG.get(current_cycle, CYCLE_CONFIG['range'])
     week_num = last_dt.isocalendar()[1]
+    cycle_emoji = {'bull': '🐂', 'bear': '🐻', 'range': '➡️'}
     lines = []
     lines.append("=" * 70)
-    lines.append("  同花顺模拟盘 · 每周股票投资 Top5 权重建议")
+    lines.append("  同花顺模拟盘 · 每周股票投资权重建议")
     lines.append(f"  生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
     lines.append(f"  基准日: {last_dt.strftime('%Y-%m-%d')} (第{week_num}周)")
+    lines.append(f"  市场周期: {cycle_emoji.get(current_cycle, '')} {current_cycle.upper()} | 仓位 {cycle_cfg['position_pct']*100:.0f}% | Top{cycle_cfg['top_n']}")
     lines.append(f"  初始资金: {INITIAL_CAPITAL:,} 元 | 股票池: 电子科技50股")
     lines.append(f"  可购买性检查: 每只至少买入 {MIN_LOTS} 手 ({MIN_LOTS*LOT_SIZE}股)")
     lines.append("=" * 70)
@@ -491,11 +513,13 @@ def generate_thss_report(portfolio, selected_df, last_dt, cash_left):
 
 def main():
     panel, loaded, all_models, scaler, xgb_models, xgb_scalers = load_and_train()
-    portfolio, selected_df, daily, last_dt, cash_left = generate_top_picks(
+    portfolio, selected_df, daily, last_dt, cash_left, current_cycle = generate_top_picks(
         panel, loaded, all_models, scaler, xgb_models, xgb_scalers)
 
+    cycle_cfg = CYCLE_CONFIG.get(current_cycle, CYCLE_CONFIG['range'])
+
     print(f"\n{'='*60}")
-    print(f"  Top {TOP_K} 可购买投资组合")
+    print(f"  [{current_cycle.upper()}周期] Top{cycle_cfg['top_n']} 可购买投资组合")
     print(f"{'='*60}")
     cols_to_show = ['股票代码','股票名称','权重','现价','买入(手)','买入(股)','占用资金']
     print(portfolio[cols_to_show].to_string(index=False))
@@ -503,10 +527,10 @@ def main():
     print(f"  选股过程: 从Top{CANDIDATE_POOL}候选池中筛选可购买标的")
 
     # 推送飞书
-    push_to_feishu(portfolio, daily, last_dt, cash_left)
+    push_to_feishu(portfolio, daily, last_dt, cash_left, current_cycle)
 
     # 同花顺格式报告
-    thss_report = generate_thss_report(portfolio, selected_df, last_dt, cash_left)
+    thss_report = generate_thss_report(portfolio, selected_df, last_dt, cash_left, current_cycle)
     print(f"\n{'='*70}")
     print("  同花顺模拟盘每周Top5推荐已生成!")
     print(f"{'='*70}")

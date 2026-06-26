@@ -101,3 +101,74 @@ class RegimeController:
             return self.current_regime
         else:
             return self.current_regime
+
+
+def detect_market_cycle(market_df, lookback=200):
+    """Detect long-term market cycle: bull/bear/range"""
+    if len(market_df) < 120:
+        return 'range'
+    if isinstance(market_df['close'], pd.DataFrame):
+        close_series = market_df['close'].iloc[:, 0]
+    else:
+        close_series = market_df['close']
+    df_slice = pd.DataFrame({'close': close_series.iloc[-lookback:]})
+    returns = df_slice['close'].pct_change().dropna()
+    current_price = df_slice['close'].iloc[-1]
+
+    ma200 = df_slice['close'].rolling(200).mean().iloc[-1]
+    price_vs_ma200 = (current_price - ma200) / ma200 if ma200 > 0 else 0
+
+    high_252 = df_slice['close'].rolling(252).max().iloc[-1]
+    drawdown = (high_252 - current_price) / high_252 if high_252 > 0 else 0
+
+    vol_20 = returns.tail(20).std() * np.sqrt(252)
+    vol_60 = returns.tail(60).std() * np.sqrt(252) if len(returns) >= 60 else vol_20
+    vol_ratio = vol_20 / vol_60 if vol_60 > 0 else 1.0
+
+    is_bull = (price_vs_ma200 > -0.05) and (drawdown < 0.12) and (vol_ratio < 1.3)
+    is_bear = (price_vs_ma200 < -0.05) or (drawdown > 0.15) or (vol_ratio > 1.5)
+
+    if is_bull and not is_bear:
+        return 'bull'
+    elif is_bear:
+        return 'bear'
+    else:
+        return 'range'
+
+
+class CycleController:
+    def __init__(self, min_hold_days=20, max_hold_days=120):
+        self.min_hold_days = min_hold_days
+        self.max_hold_days = max_hold_days
+        self.current_cycle = None
+        self.cycle_start_date = None
+        self.days_in_cycle = 0
+        self.switch_log = []
+
+    def update(self, date, raw_cycle):
+        if self.current_cycle is None:
+            self.current_cycle = raw_cycle
+            self.cycle_start_date = date
+            self.days_in_cycle = 0
+            return self.current_cycle
+
+        self.days_in_cycle += 1
+
+        if raw_cycle == self.current_cycle:
+            return self.current_cycle
+
+        min_hold_passed = self.days_in_cycle >= self.min_hold_days
+        max_hold_reached = self.days_in_cycle >= self.max_hold_days
+
+        if min_hold_passed or max_hold_reached:
+            self.switch_log.append({
+                'date': str(date), 'from': self.current_cycle,
+                'to': raw_cycle, 'held_days': self.days_in_cycle,
+                'reason': 'max_hold' if max_hold_reached else 'min_hold'
+            })
+            self.current_cycle = raw_cycle
+            self.cycle_start_date = date
+            self.days_in_cycle = 0
+            return self.current_cycle
+        else:
+            return self.current_cycle

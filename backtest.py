@@ -7,9 +7,9 @@ from datetime import datetime
 
 from config import (TRADING_DAYS, RISK_FREE_RATE, COMMISSION_RATE, STAMP_DUTY_RATE,
                      TRANSFER_FEE_RATE, SECTOR_MAP, MAX_SECTOR_PCT, TOP_N, 
-                     OUTPUT_DIR, DEVICE)
+                     OUTPUT_DIR, DEVICE, CYCLE_CONFIG)
 from features import TECHNICAL_FEATURES_DL as DL_FEATURES, TECHNICAL_FEATURES
-from regime import detect_market_regime, RegimeController
+from regime import detect_market_regime, RegimeController, detect_market_cycle, CycleController
 from data_layer import SequenceDataset
 
 
@@ -69,10 +69,14 @@ class DeepQuantBacktester:
         print("预计算市场环境...")
         regime_controller = RegimeController(min_hold_days=min_hold_days)
         filtered_regimes = []
+        cycle_controller = CycleController()
+        filtered_cycles = []
         for dt in unique_dates:
             m_slice = self.market_df.loc[:dt]
             raw = detect_market_regime(m_slice)
             filtered_regimes.append(regime_controller.update(dt, raw))
+            raw_cycle = detect_market_cycle(m_slice)
+            filtered_cycles.append(cycle_controller.update(dt, raw_cycle))
 
         # DL预计算 (同上)
         if not hasattr(self, '_cached_dl_map') or self._cached_dl_map is None:
@@ -149,6 +153,7 @@ class DeepQuantBacktester:
                     day_data['DL_Pred'] = 0.0
 
             day_data['Regime'] = reg
+            day_data['Cycle'] = filtered_cycles[i]
             day_data['date'] = dt
             all_pred_rows.append(day_data)
 
@@ -165,10 +170,18 @@ class DeepQuantBacktester:
             print("IC为负，取反预测值")
             df_pred['DL_Pred'] = -df_pred['DL_Pred']
 
-        # ── 优化5: 信号生成 — groupby rank 替代逐日 .xs() + .loc ──
-        print("生成信号...")
+        # ── 优化5: 信号生成 — 周期感知的动态TOP_N ──
+        print("生成信号 (周期感知)...")
+        top_n_map = {'bull': CYCLE_CONFIG['bull']['top_n'],
+                     'range': CYCLE_CONFIG['range']['top_n'],
+                     'bear': CYCLE_CONFIG['bear']['top_n']}
+        df_pred['TopN'] = df_pred['Cycle'].map(top_n_map).fillna(5).astype(int)
         df_pred['Rank'] = df_pred.groupby('date')['DL_Pred'].rank(ascending=False, method='first')
-        df_pred['Signal'] = np.where(df_pred['Rank'] <= TOP_N, 1.0 / TOP_N, 0.0)
+        def assign_signal(g):
+            top_n = g['TopN'].iloc[0]
+            g['Signal'] = np.where(g['Rank'] <= top_n, 1.0 / top_n, 0.0)
+            return g
+        df_pred = df_pred.groupby('date', group_keys=False).apply(assign_signal)
 
         # ── 优化6: 周度调仓 — 批量替代逐周 boolean mask ──
         print("应用缓冲带 + 权重过滤...")
@@ -187,6 +200,10 @@ class DeepQuantBacktester:
             if new_w.empty:
                 continue
 
+            # 获取该周市场周期 → 仓位比例
+            wk_cycle = fd['Cycle'].iloc[0]
+            position_pct = CYCLE_CONFIG.get(wk_cycle, {}).get('position_pct', 1.0)
+
             if len(prev_weights) > 0:
                 u = prev_weights.index.union(new_w.index)
                 pv = prev_weights.reindex(u, fill_value=0)
@@ -197,6 +214,9 @@ class DeepQuantBacktester:
                 final_w = final_local / final_local.sum() if final_local.sum() > 0 else final_local
             else:
                 final_w = new_w
+
+            # 应用周期仓位控制
+            final_w = final_w * position_pct
 
             for code, weight in final_w.items():
                 df.loc[wk.index[wk['code'] == code], 'Signal_Final'] = weight
@@ -216,7 +236,8 @@ class DeepQuantBacktester:
             'Strategy_Ret_Gross': 'sum',
             'Strategy_Ret': 'sum',
             'Trade_Cost': 'sum',
-            'Regime': lambda x: x.mode()[0] if len(x.mode()) > 0 else 'neutral'
+            'Regime': lambda x: x.mode()[0] if len(x.mode()) > 0 else 'neutral',
+            'Cycle': lambda x: x.mode()[0] if len(x.mode()) > 0 else 'range',
         })
         daily['Cum_Benchmark'] = (1 + daily['Simple_Return']).cumprod() - 1
         daily['Cum_Strategy'] = (1 + daily['Strategy_Ret']).cumprod() - 1
@@ -250,10 +271,15 @@ class DeepQuantBacktester:
         print(f"  总交易成本: {total_c*100:.2f}%")
         print(f"  成本腐蚀: {cost_pct:.2f}%")
 
-        print(f"\n市场环境分布:")
+        print(f"\n市场环境分布 (短周期):")
         rc = daily['Regime'].value_counts()
         for r, c in rc.items():
             print(f"  {r}: {c}天 ({c/len(daily)*100:.1f}%)")
+        print(f"\n市场周期分布 (牛/熊/震荡):")
+        if 'Cycle' in daily.columns:
+            cc = daily['Cycle'].value_counts()
+            for c, cnt in cc.items():
+                print(f"  {c}: {cnt}天 ({cnt/len(daily)*100:.1f}%)")
 
     def save_results(self, daily_ret, tag=''):
         ts = datetime.now().strftime('%Y%m%d_%H%M%S')

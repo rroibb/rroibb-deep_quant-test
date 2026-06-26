@@ -41,6 +41,13 @@ STOCK_POOL = list(SECTOR_MAP.keys())
 MAX_SECTOR_PCT = 0.30
 TOP_N = 8
 
+# 市场周期配置 (牛市/震荡/熊市 → 仓位/选股/风控)
+CYCLE_CONFIG = {
+    'bull':  {'position_pct': 0.95, 'top_n': 8,  'stop_loss': 0.10, 'target_vol': 0.18},
+    'range': {'position_pct': 0.65, 'top_n': 5,  'stop_loss': 0.08, 'target_vol': 0.14},
+    'bear':  {'position_pct': 0.40, 'top_n': 3,  'stop_loss': 0.05, 'target_vol': 0.10},
+}
+
 # 深度学习参数
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print(f"使用设备: {DEVICE}")
