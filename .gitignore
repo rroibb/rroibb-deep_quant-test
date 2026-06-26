@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+.venv/
+*.egg-info/
+dist/
+
+# IDE
+.idea/
+*.swp
+*.swo
+
+# Data cache
+a_stock_cache/
+*.parquet
+*.ttf
+
+# Output
+output/
+
+# Environment
+.env
+*.env.local
+
+# OS
+Thumbs.db
+.DS_Store
