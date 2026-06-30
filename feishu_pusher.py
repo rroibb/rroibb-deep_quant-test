@@ -134,7 +134,7 @@ class FeishuPusher:
         header += "| :--- | ---: | ---: | ---: | ---: | ---: |\n"
         rows = ""
         cn_names = {
-            'Multimodal Fusion (DL+XGB+NLP+LLM)': '全模态融合 (DL+XGB+NLP+LLM)',
+            'Multimodal Fusion (DL+XGB)': '多模态融合 (DL+XGB)',
             'Deep Learning Only (LSTM+Transformer+CNN)': '纯深度学习 (LSTM+Transformer+CNN)',
             'XGBoost Only': '纯 XGBoost',
         }

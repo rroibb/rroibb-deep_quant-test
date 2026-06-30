@@ -87,19 +87,19 @@ dl_models['cnn'] = cnn
 xgb_models, xgb_scalers, _ = train_xgboost_models(panel, market_df)
 
 from models.fusion import MultiModalFusionModel
-from models.nlp_sentiment import NLPSentimentAnalyzer
-from models.llm_analyzer import LLMAnalyzer
-all_models = {**dl_models, 'fusion': MultiModalFusionModel(),
-              'nlp': NLPSentimentAnalyzer(), 'llm': LLMAnalyzer(use_mock=True)}
+all_models = {**dl_models, 'fusion': MultiModalFusionModel()}
 
 # 回测
 v0, v1 = val_dates[0], val_dates[-1]
-bt = DeepQuantBacktester(panel.loc[v0:v1], market_df.loc[v0:v1],
-                         all_models, scaler, xgb_models=xgb_models, xgb_scalers=xgb_scalers)
+all_dates = sorted(panel.index.get_level_values(0).unique())
+warmup_idx = max(0, all_dates.index(v0) - 30)
+bt = DeepQuantBacktester(panel.loc[all_dates[warmup_idx]:v1], market_df.loc[v0:v1],
+                         all_models, scaler, xgb_models=xgb_models, xgb_scalers=xgb_scalers,
+                         backtest_start=v0)
 
 results_tech = {}
 for name, uf, ux, ud in [
-    ('Multimodal Fusion (DL+XGB+NLP+LLM)', True, True, True),
+    ('Multimodal Fusion (DL+XGB)', True, True, True),
     ('Deep Learning Only (LSTM+Transformer+CNN)', False, False, True),
     ('XGBoost Only', False, True, False),
 ]:

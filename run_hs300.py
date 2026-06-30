@@ -164,12 +164,17 @@ def run_backtest(panel, market_df, all_models, scaler, xgb_models, xgb_scalers, 
     print(f"{'=' * 60}")
 
     val_start, val_end = val_dates[0], val_dates[-1]
-    panel_subset = panel.loc[val_start:val_end]
+    all_dates = sorted(panel.index.get_level_values(0).unique())
+    warmup_idx = max(0, all_dates.index(val_start) - 30)
+    warmup_start = all_dates[warmup_idx]
+    panel_subset = panel.loc[warmup_start:val_end]
     market_subset = market_df.loc[val_start:val_end]
     print(f"  回测区间: {val_start.date()} ~ {val_end.date()}, {len(market_subset)}天")
+    print(f"  DL预热数据: {warmup_start.date()} ~ {val_start.date()}, {(all_dates.index(val_start)-warmup_idx)}天")
 
     bt = DeepQuantBacktester(panel_subset, market_subset, all_models, scaler,
-                             xgb_models=xgb_models, xgb_scalers=xgb_scalers)
+                             xgb_models=xgb_models, xgb_scalers=xgb_scalers,
+                             backtest_start=val_start)
 
     results = {}
     for mode_name, use_f, use_x, use_d in [

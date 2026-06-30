@@ -238,16 +238,19 @@ def run_food_pipeline():
     print("  [5/6] 回测对比...")
     print(f"{'=' * 60}")
     val_start, val_end = val_dates[0], val_dates[-1]
-    panel_subset = panel.loc[val_start:val_end]
+    all_dates = sorted(panel.index.get_level_values(0).unique())
+    warmup_idx = max(0, all_dates.index(val_start) - 30)
+    panel_subset = panel.loc[all_dates[warmup_idx]:val_end]
     market_subset = market_df.loc[val_start:val_end]
     print(f"  区间: {val_start.date()} ~ {val_end.date()}, {len(market_subset)}天")
 
     bt = DeepQuantBacktester(panel_subset, market_subset, all_models, scaler,
-                             xgb_models=xgb_models, xgb_scalers=xgb_scalers)
+                             xgb_models=xgb_models, xgb_scalers=xgb_scalers,
+                             backtest_start=val_start)
 
     results = {}
     for mode_name, use_f, use_x, use_d in [
-        ('Multimodal Fusion (DL+XGB+NLP+LLM)', True, True, True),
+        ('Multimodal Fusion (DL+XGB)', True, True, True),
         ('Deep Learning Only (LSTM+Transformer+CNN)', False, False, True),
         ('XGBoost Only', False, True, False),
     ]:

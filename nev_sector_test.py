@@ -176,13 +176,16 @@ def run_nev_pipeline():
     # 回测
     print(f"\n{'='*60}\n  [5/6] 回测对比...\n{'='*60}")
     v0, v1 = val_dates[0], val_dates[-1]
-    ps = panel.loc[v0:v1]; ms = market_df.loc[v0:v1]
+    all_dates = sorted(panel.index.get_level_values(0).unique())
+    warmup_idx = max(0, all_dates.index(v0) - 30)
+    ps = panel.loc[all_dates[warmup_idx]:v1]; ms = market_df.loc[v0:v1]
     print(f"  区间: {v0.date()}~{v1.date()}, {len(ms)}天")
 
-    bt = DeepQuantBacktester(ps, ms, all_models, scaler, xgb_models=xgb_models, xgb_scalers=xgb_scalers)
+    bt = DeepQuantBacktester(ps, ms, all_models, scaler, xgb_models=xgb_models, xgb_scalers=xgb_scalers,
+                             backtest_start=v0)
     results = {}
     for mode_name, uf, ux, ud in [
-        ('Multimodal Fusion (DL+XGB+NLP+LLM)', True, True, True),
+        ('Multimodal Fusion (DL+XGB)', True, True, True),
         ('Deep Learning Only (LSTM+Transformer+CNN)', False, False, True),
         ('XGBoost Only', False, True, False),
     ]:
