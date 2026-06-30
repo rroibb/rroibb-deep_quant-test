@@ -231,12 +231,7 @@ def run_food_pipeline():
 
     print("  [4/6] 加载辅助模型...")
     from models.fusion import MultiModalFusionModel
-    from models.nlp_sentiment import NLPSentimentAnalyzer
-    from models.llm_analyzer import LLMAnalyzer
-    fusion_model = MultiModalFusionModel()
-    nlp_model = NLPSentimentAnalyzer()
-    llm_model = LLMAnalyzer(use_mock=True)
-    all_models = {**dl_models, 'fusion': fusion_model, 'nlp': nlp_model, 'llm': llm_model}
+    all_models = {**dl_models, 'fusion': fusion_model}
 
     # Step 5: 回测
     print(f"\n{'=' * 60}")

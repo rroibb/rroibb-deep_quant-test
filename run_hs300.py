@@ -1,8 +1,10 @@
 """
-deep_quant 全流程执行 + 飞书推送
-一次运行：数据加载 -> 模型训练 -> 回测对比 -> 可视化 -> 飞书推送
+沪深300全流程量化策略回测
+数据源: hs300_cache/ (已缓存的沪深300成分股数据)
+基准: CSI 300指数 (000300.SH)
+区间: 2020-01-01 ~ 至今
 """
-import sys, os, numpy as np, pandas as pd
+import sys, os, json, numpy as np, pandas as pd
 import warnings
 warnings.filterwarnings('ignore', category=UserWarning)
 
@@ -10,21 +12,35 @@ BASE = os.path.dirname(os.path.abspath(__file__))
 if BASE not in sys.path:
     sys.path.insert(0, BASE)
 
+# ── 临时覆写 config 的股票池 ──────────────────────────────
+import config as cfg
+
+with open(os.path.join(BASE, 'tmp_hs300_tickers.json')) as f:
+    HS300_TICKERS = json.load(f)
+
+# 构建简易的 SECTOR_MAP (全部归为"沪深300"避免行业约束)
+HS300_SECTOR_MAP = {t: '沪深300' for t in HS300_TICKERS}
+cfg.STOCK_POOL = HS300_TICKERS
+cfg.SECTOR_MAP = HS300_SECTOR_MAP
+cfg.MAX_SECTOR_PCT = 1.0  # 不限制行业集中度
+
 from config import STOCK_POOL, OUTPUT_DIR, DEVICE
 from features import engineer_features, TECHNICAL_FEATURES_DL, TECHNICAL_FEATURES
 from trainer import train_xgboost_models, prepare_dl_panel, train_model
 from backtest import DeepQuantBacktester
 from feishu_pusher import FeishuPusher
-from visualization import plot_all, plot_dashboard
+from visualization import plot_all
 from datetime import datetime
 
-CACHE_DIR = os.path.join(BASE, 'a_stock_cache')
+CACHE_DIR = os.path.join(BASE, 'hs300_cache')
+INDEX_PATH = os.path.join(BASE, 'csi300_cache', 'csi300_index.parquet')
+
+TRAIN_EPOCHS = 5  # CPU 训练, 保持与之前一致
 
 
 def load_data():
-    """加载缓存数据并构建面板"""
     print("=" * 60)
-    print("  [1/6] 加载数据...")
+    print("  [1/6] 加载沪深300数据...")
     print("=" * 60)
 
     loaded = {}
@@ -36,12 +52,15 @@ def load_data():
             continue
         try:
             df = pd.read_parquet(os.path.join(CACHE_DIR, fname))
-            if len(df) > 60:
-                df = engineer_features(df)
-                df['code'] = ticker
-                loaded[ticker] = df
+            # trade_date 是 string → datetime
+            df['trade_date'] = pd.to_datetime(df['trade_date'])
+            # 去重
+            df = df.drop_duplicates(subset=['trade_date']).sort_values('trade_date')
+            df = engineer_features(df)
+            df['code'] = ticker
+            loaded[ticker] = df
         except Exception as e:
-            print(f"  [跳过] {ticker}: {e}")
+            print(f"  跳过 {ticker}: {e}")
 
     print(f"  加载: {len(loaded)}/{len(STOCK_POOL)} 只股票")
 
@@ -53,32 +72,28 @@ def load_data():
 
     panel = pd.concat(df_list, ignore_index=True)
     panel['date'] = pd.to_datetime(panel['trade_date'])
+    panel = panel.replace([np.inf, -np.inf], np.nan)
     panel = panel.set_index(['date', 'code']).sort_index()
     print(f"  面板: {panel.shape}")
 
-    # 构建等权市场基准
-    all_returns = []
-    for ticker, df in loaded.items():
-        ret = df['close'].pct_change().rename(ticker)
-        all_returns.append(ret)
-    ret_panel = pd.concat(all_returns, axis=1)
-    equal_weight_ret = ret_panel.mean(axis=1)
-    market_df = pd.DataFrame(index=equal_weight_ret.index)
-    market_df['close'] = (1 + equal_weight_ret).cumprod()
-    market_df['open'] = market_df['close']
-    market_df['high'] = market_df['close']
-    market_df['low'] = market_df['close']
-    market_df['pre_close'] = market_df['close'].shift(1).fillna(market_df['close'].iloc[0])
-    market_df['volume'] = 0
-    market_df['amount'] = 0
-    market_df['Simple_Return'] = equal_weight_ret
-    print(f"  基准指数: {market_df['close'].iloc[-1] / market_df['close'].iloc[0] - 1:+.2%}")
+    # ── 加载沪深300指数作为基准 ──
+    idx_df = pd.read_parquet(INDEX_PATH)
+    idx_df['trade_date'] = pd.to_datetime(idx_df['trade_date'])
+    idx_df = idx_df.drop_duplicates(subset=['trade_date']).sort_values('trade_date').set_index('trade_date')
+    idx_df['Simple_Return'] = idx_df['close'].pct_change()
+    idx_df['pre_close'] = idx_df['close'].shift(1).fillna(idx_df['close'].iloc[0])
+    print(f"  沪深300指数: {idx_df.shape}, {idx_df.index[0].date()} ~ {idx_df.index[-1].date()}")
+    print(f"  累计涨幅: {idx_df['close'].iloc[-1] / idx_df['close'].iloc[0] - 1:+.2%}")
 
-    return panel, loaded, market_df
+    return panel, loaded, idx_df
 
 
 def train_models(panel, market_df):
-    """训练所有模型 (DL + XGBoost)"""
+    from torch.utils.data import DataLoader
+    from data_layer import SequenceDataset
+    from models import LSTMStockPredictor, TransformerStockPredictor, CNNChartPatternRecognizer
+    import torch
+
     print(f"\n{'=' * 60}")
     print("  [2/6] 训练深度学习模型...")
     print(f"{'=' * 60}")
@@ -87,7 +102,11 @@ def train_models(panel, market_df):
         lambda x: x.shift(-20) / x - 1
     )
 
-    panel_dl, scaler = prepare_dl_panel(panel, TECHNICAL_FEATURES_DL)
+    # 清理 inf/nan
+    panel_clean = panel.replace([np.inf, -np.inf], np.nan)
+    panel_clean = panel_clean.dropna(subset=TECHNICAL_FEATURES_DL)
+    print(f"  清理后: {panel_clean.shape}")
+    panel_dl, scaler = prepare_dl_panel(panel_clean, TECHNICAL_FEATURES_DL)
 
     all_dates = sorted(panel_dl.index.get_level_values(0).unique())
     recent_dates = all_dates[-500:]
@@ -96,11 +115,6 @@ def train_models(panel, market_df):
     val_dates = recent_dates[split_idx:]
     print(f"  训练: {train_dates[0].date()} ~ {train_dates[-1].date()} ({len(train_dates)}天)")
     print(f"  验证: {val_dates[0].date()} ~ {val_dates[-1].date()} ({len(val_dates)}天)")
-
-    from torch.utils.data import DataLoader
-    from data_layer import SequenceDataset
-    from models import LSTMStockPredictor, TransformerStockPredictor, CNNChartPatternRecognizer
-    import torch
 
     train_p = panel_dl[panel_dl.index.get_level_values(0).isin(train_dates)]
     val_p = panel_dl[panel_dl.index.get_level_values(0).isin(val_dates)]
@@ -118,23 +132,24 @@ def train_models(panel, market_df):
 
     print("  训练 LSTM...")
     lstm = LSTMStockPredictor(input_size=12, hidden_size=64, num_layers=1, bidirectional=False).to(DEVICE)
-    lstm, _, _ = train_model(lstm, train_loader, val_loader, epochs=5, model_name='LSTM')
+    lstm, _, _ = train_model(lstm, train_loader, val_loader, epochs=TRAIN_EPOCHS, model_name='LSTM')
     dl_models['lstm'] = lstm
 
     print("  训练 Transformer...")
     trans = TransformerStockPredictor(input_size=12, d_model=64, nhead=2, num_encoder_layers=2).to(DEVICE)
-    trans, _, _ = train_model(trans, train_loader, val_loader, epochs=5, model_name='Transformer')
+    trans, _, _ = train_model(trans, train_loader, val_loader, epochs=TRAIN_EPOCHS, model_name='Transformer')
     dl_models['transformer'] = trans
 
     print("  训练 CNN...")
     cnn = CNNChartPatternRecognizer(in_channels=12).to(DEVICE)
-    cnn, _, _ = train_model(cnn, train_loader, val_loader, epochs=5, model_name='CNN')
+    cnn, _, _ = train_model(cnn, train_loader, val_loader, epochs=TRAIN_EPOCHS, model_name='CNN')
     dl_models['cnn'] = cnn
 
     print(f"\n{'=' * 60}")
     print("  [3/6] 训练 XGBoost...")
     print(f"{'=' * 60}")
-    xgb_models, xgb_scalers, _ = train_xgboost_models(panel, market_df)
+    panel_xgb = panel.replace([np.inf, -np.inf], np.nan)
+    xgb_models, xgb_scalers, _ = train_xgboost_models(panel_xgb, market_df)
 
     print("  [4/6] 加载融合模型...")
     from models.fusion import MultiModalFusionModel
@@ -144,7 +159,6 @@ def train_models(panel, market_df):
 
 
 def run_backtest(panel, market_df, all_models, scaler, xgb_models, xgb_scalers, val_dates):
-    """运行3模式回测对比"""
     print(f"\n{'=' * 60}")
     print("  [5/6] 回测对比...")
     print(f"{'=' * 60}")
@@ -171,31 +185,29 @@ def run_backtest(panel, market_df, all_models, scaler, xgb_models, xgb_scalers, 
 
 
 def push_to_feishu(results, chart_paths, webhook_url, secret='', val_dates=None):
-    """推送中文卡片到飞书"""
     print(f"\n{'=' * 60}")
-    print("  [6/6] 推送中文回测报告到飞书...")
+    print("  [6/6] 推送回测报告到飞书...")
     print(f"{'=' * 60}")
 
     pusher = FeishuPusher(webhook_url=webhook_url, secret=secret)
 
     period = ''
     if val_dates and len(val_dates) >= 2:
-        period = f"{val_dates[0].date()} ~ {val_dates[-1].date()} (100个交易日)"
+        period = f"{val_dates[0].date()} ~ {val_dates[-1].date()}"
 
     pusher.send_backtest_report(
         results=results,
-        pool_name='电子科技50股',
-        benchmark_name='电子科技50等权指数',
+        pool_name='沪深300成分股',
+        benchmark_name='沪深300指数 (000300.SH)',
         period=period,
         generated=datetime.now().strftime('%Y-%m-%d %H:%M'),
     )
-
     print(f"  飞书推送完成!")
 
 
 def main():
     print("=" * 70)
-    print("  deep_quant 全流程量化策略执行")
+    print("  deep_quant 沪深300全流程量化策略回测")
     print(f"  时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"  设备: {DEVICE}")
     print("=" * 70)
@@ -225,23 +237,23 @@ def main():
     ts = datetime.now().strftime('%Y%m%d_%H%M%S')
     for name, daily in results.items():
         fname = name.replace(' ', '_').replace('(', '').replace(')', '').replace('+', 'n')
-        daily.to_csv(os.path.join(OUTPUT_DIR, f'{fname}_{ts}.csv'), encoding='utf-8-sig')
+        daily.to_csv(os.path.join(OUTPUT_DIR, f'HS300_{fname}_{ts}.csv'), encoding='utf-8-sig')
 
     print(f"\n{'=' * 60}")
     bench = next(iter(results.values()))['Cum_Benchmark']
-    print(f"  基准累计收益: {bench.iloc[-1]*100:.2f}%")
+    print(f"  沪深300基准累计收益: {bench.iloc[-1]*100:.2f}%")
     for name, daily in results.items():
         print(f"  {name}: {daily['Cum_Strategy'].iloc[-1]*100:.2f}%")
     print(f"  图表: {len(chart_paths)} 张")
     print(f"  数据已保存至: {OUTPUT_DIR}")
 
-    # 8. 飞书推送 (中文卡片)
+    # 8. 飞书推送
     webhook_url = os.environ.get('FEISHU_WEBHOOK_URL', '')
     webhook_secret = os.environ.get('FEISHU_WEBHOOK_SECRET', '')
     if webhook_url:
         push_to_feishu(results, chart_paths, webhook_url, webhook_secret, val_dates)
     else:
-        print(f"\n  [飞书] 未设置 FEISHU_WEBHOOK_URL 环境变量，跳过推送")
+        print(f"\n  [飞书] 未设置 FEISHU_WEBHOOK_URL, 跳过推送")
 
     print(f"\n{'=' * 70}")
     print("  全流程执行完成!")

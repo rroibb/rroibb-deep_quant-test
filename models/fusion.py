@@ -5,12 +5,12 @@ from .base import BaseDeepModel
 
 
 class MultiModalFusionModel(BaseDeepModel):
-    def __init__(self, lstm_dim=128, transformer_dim=64, cnn_dim=64, nlp_dim=64, llm_dim=32,
+    def __init__(self, lstm_dim=128, transformer_dim=64, cnn_dim=64,
                  xgb_dim=32, hidden_dim=128, num_regimes=3, output_dim=1):
         super().__init__(name='MultiModalFusion')
         self.output_dim = output_dim
 
-        input_dim = lstm_dim + transformer_dim + cnn_dim + nlp_dim + llm_dim + xgb_dim * 3
+        input_dim = lstm_dim + transformer_dim + cnn_dim + xgb_dim * 3
 
         self.regime_embedding = nn.Embedding(num_regimes, 16)
         input_dim += 16
@@ -31,8 +31,6 @@ class MultiModalFusionModel(BaseDeepModel):
             'lstm': nn.Linear(1, lstm_dim),
             'transformer': nn.Linear(1, transformer_dim),
             'cnn': nn.Linear(1, cnn_dim),
-            'nlp': nn.Linear(1, nlp_dim),
-            'llm': nn.Linear(1, llm_dim),
             'xgb_trend': nn.Linear(1, xgb_dim),
             'xgb_mean_reversion': nn.Linear(1, xgb_dim),
             'xgb_neutral': nn.Linear(1, xgb_dim),
@@ -48,14 +46,12 @@ class MultiModalFusionModel(BaseDeepModel):
             nn.Sigmoid(),
         )
 
-    def forward(self, lstm_out, transformer_out, cnn_out, nlp_out, llm_out,
+    def forward(self, lstm_out, transformer_out, cnn_out,
                 xgb_trend=None, xgb_rev=None, xgb_neutral=None, regime_idx=None):
         modality_scores = {
             'lstm': lstm_out,
             'transformer': transformer_out,
             'cnn': cnn_out,
-            'nlp': nlp_out,
-            'llm': llm_out,
         }
         for name, val in [('xgb_trend', xgb_trend), ('xgb_mean_reversion', xgb_rev), ('xgb_neutral', xgb_neutral)]:
             if val is not None:
@@ -106,7 +102,7 @@ class MultiModalFusionModel(BaseDeepModel):
         default_tensor = torch.zeros(batch, device=device)
 
         tensor_dict = {}
-        for name in ['lstm', 'transformer', 'cnn', 'nlp', 'llm', 'xgb_trend', 'xgb_mean_reversion', 'xgb_neutral']:
+        for name in ['lstm', 'transformer', 'cnn', 'xgb_trend', 'xgb_mean_reversion', 'xgb_neutral']:
             val = predictions_dict.get(name, 0)
             if isinstance(val, (int, float, np.floating)):
                 if np.isnan(val):
@@ -134,8 +130,7 @@ class MultiModalFusionModel(BaseDeepModel):
         with torch.no_grad():
             result = self.forward(
                 tensor_dict['lstm'], tensor_dict['transformer'],
-                tensor_dict['cnn'], tensor_dict['nlp'],
-                tensor_dict['llm'],
+                tensor_dict['cnn'],
                 xgb_trend=tensor_dict.get('xgb_trend', default_tensor),
                 xgb_rev=tensor_dict.get('xgb_mean_reversion', default_tensor),
                 xgb_neutral=tensor_dict.get('xgb_neutral', default_tensor),

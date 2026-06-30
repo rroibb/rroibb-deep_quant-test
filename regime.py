@@ -2,67 +2,148 @@ import numpy as np
 import pandas as pd
 
 
+def _ols_trend(close_values):
+    """对 log(close) 做 OLS 回归, 返回 slope(年化%), R², t-stat, ann_vol"""
+    n = len(close_values)
+    if n < 5:
+        return 0.0, 0.0, 0.0, 0.0
+
+    log_p = np.log(np.asarray(close_values, dtype=float))
+    x = np.arange(n, dtype=float)
+    x_mean = (n - 1) / 2.0
+    log_p_mean = log_p.mean()
+
+    dx = x - x_mean
+    dy = log_p - log_p_mean
+    ssxx = np.sum(dx * dx)
+    ssxy = np.sum(dx * dy)
+
+    slope = ssxy / ssxx if ssxx > 1e-12 else 0.0
+    intercept = log_p_mean - slope * x_mean
+
+    predicted = intercept + slope * x
+    residuals = log_p - predicted
+    rss = np.sum(residuals ** 2)
+    tss = np.sum(dy * dy)
+    r2 = 1.0 - rss / tss if tss > 1e-12 else 0.0
+
+    mse = rss / max(n - 2, 1)
+    se_slope = np.sqrt(mse / ssxx) if ssxx > 1e-12 else 0.0
+    t_stat = slope / se_slope if se_slope > 1e-12 else 0.0
+
+    ann_slope = slope * 252 * 100
+
+    returns = np.diff(log_p)
+    ann_vol = returns.std() * np.sqrt(252) * 100 if len(returns) > 1 else 0.0
+
+    return ann_slope, r2, t_stat, ann_vol
+
+
+def _extract_close(market_df):
+    if isinstance(market_df, pd.Series):
+        return market_df.values
+    if isinstance(market_df, pd.DataFrame):
+        if 'close' in market_df.columns:
+            c = market_df['close']
+        else:
+            c = market_df.iloc[:, 0]
+        if isinstance(c, pd.DataFrame):
+            c = c.iloc[:, 0]
+        return c.values
+    return np.asarray(market_df, dtype=float)
+
+
 def detect_market_regime(market_df, lookback=60):
-    if len(market_df) < lookback:
+    """
+    改进版市场状态检测:
+      - OLS 对数价格趋势 (年化斜率, R², t-stat)
+      - 波动率水平
+      - 收益自相关
+    返回: 'trend', 'mean_reversion', 'neutral'
+
+    注意: market_df 必须是截至当前时刻的切片, 函数内部取尾端 lookback 条.
+    """
+    if not isinstance(market_df, (pd.Series, pd.DataFrame)) or len(market_df) < 20:
         return 'neutral'
 
-    if isinstance(market_df['close'], pd.DataFrame):
-        close_series = market_df['close'].iloc[:, 0]
-    else:
-        close_series = market_df['close']
-
-    df_slice = pd.DataFrame({'close': close_series.iloc[-lookback:]})
-    returns = df_slice['close'].pct_change().dropna()
-
-    if len(returns) < 20:
+    close_values = _extract_close(market_df)
+    if len(close_values) < lookback:
         return 'neutral'
+    close_values = close_values[-lookback:]
 
-    ma5 = df_slice['close'].rolling(5).mean()
-    ma20 = df_slice['close'].rolling(20).mean()
-    ma60 = df_slice['close'].rolling(60).mean()
-    current_price = df_slice['close']
-    price_vs_ma20 = (current_price - ma20) / ma20
+    ann_slope, r2, t_stat, ann_vol = _ols_trend(close_values)
+    n = len(close_values)
+    returns = np.diff(np.log(close_values))
+    autocorr = pd.Series(returns).autocorr(lag=1) if len(returns) > 1 else 0.0
 
-    bull_aligned = (ma5 > ma20) & (ma20 > ma60) & (current_price > ma5)
-    bear_aligned = (ma5 < ma20) & (ma20 < ma60) & (current_price < ma5)
-    strong_trend = bull_aligned | bear_aligned
+    rv_20 = np.std(returns[-20:]) * np.sqrt(252) * 100 if len(returns) >= 20 else ann_vol
 
-    bull_moderate = (
-        (current_price > ma20) & (ma5 > ma20) &
-        (price_vs_ma20 > 0.01) &
-        (price_vs_ma20 > price_vs_ma20.shift(2).fillna(0))
-    )
-    bear_moderate = (
-        (current_price < ma20) & (ma5 < ma20) &
-        (price_vs_ma20 < -0.01) &
-        (price_vs_ma20 < price_vs_ma20.shift(2).fillna(0))
-    )
-    moderate_trend = bull_moderate | bear_moderate
+    has_trend = r2 > 0.30 and abs(t_stat) > 1.8
+    strong_trend = r2 > 0.50 and abs(t_stat) > 2.5
 
-    daily_trend_signal = strong_trend | moderate_trend
-
-    trend_window = 5
-    recent_signals = daily_trend_signal.iloc[-trend_window:]
-    signal_count = recent_signals.sum()
-    signal_ratio = signal_count / trend_window
-
-    is_trend = (signal_ratio >= 0.6) and bool(daily_trend_signal.iloc[-1]) if len(daily_trend_signal) > 0 else False
-    strong_recent = bool(strong_trend.iloc[-2:].all()) if len(strong_trend) >= 2 else False
-
-    trend_strength = float(abs(price_vs_ma20).mean())
-    autocorr = float(returns.autocorr(lag=1)) if len(returns) > 1 else 0.0
-
-    if is_trend or strong_recent:
+    if strong_trend and abs(ann_slope) > 5:
         return 'trend'
-    if trend_strength > 0.03 and autocorr > 0.03:
+    if has_trend and abs(ann_slope) > 3:
         return 'trend'
 
-    near_ma20 = abs(price_vs_ma20) < 0.015
-    price_near_ma20 = bool(near_ma20.iloc[-trend_window:].sum() >= (trend_window * 0.6)) if len(near_ma20) >= trend_window else False
-    if price_near_ma20 and autocorr < -0.05 and trend_strength < 0.02:
+    is_mr = r2 < 0.15 and autocorr < -0.08 and rv_20 < 35
+    if is_mr:
         return 'mean_reversion'
 
+    if rv_20 > 50 and abs(ann_slope) > 8:
+        return 'trend'
+
     return 'neutral'
+
+
+def detect_regime_ex(market_df, lookback=60):
+    """
+    扩展版市场状态检测, 返回结构化信息.
+    返回 dict:
+      - regime: 'trend' / 'mean_reversion' / 'neutral'
+      - trend_pct: 年化趋势 (%)
+      - r2: 趋势拟合优度
+      - t_stat: 趋势 t 统计量
+      - vol_pct: 年化波动率 (%)
+      - autocorr: 1 阶自相关
+    """
+    result = {
+        'regime': 'neutral', 'trend_pct': 0.0, 'r2': 0.0,
+        't_stat': 0.0, 'vol_pct': 0.0, 'autocorr': 0.0,
+    }
+    if not isinstance(market_df, (pd.Series, pd.DataFrame)) or len(market_df) < 20:
+        return result
+
+    close_values = _extract_close(market_df)
+    if len(close_values) < lookback:
+        return result
+    close_values = close_values[-lookback:]
+
+    ann_slope, r2, t_stat, ann_vol = _ols_trend(close_values)
+    returns = np.diff(np.log(close_values))
+    autocorr = pd.Series(returns).autocorr(lag=1) if len(returns) > 1 else 0.0
+    rv_20 = np.std(returns[-20:]) * np.sqrt(252) * 100 if len(returns) >= 20 else ann_vol
+
+    result['trend_pct'] = round(ann_slope, 2)
+    result['r2'] = round(r2, 4)
+    result['t_stat'] = round(t_stat, 3)
+    result['vol_pct'] = round(ann_vol, 2)
+    result['autocorr'] = round(autocorr, 4)
+
+    has_trend = r2 > 0.30 and abs(t_stat) > 1.8
+    strong_trend = r2 > 0.50 and abs(t_stat) > 2.5
+    is_mr = r2 < 0.15 and autocorr < -0.08 and rv_20 < 35
+
+    if strong_trend and abs(ann_slope) > 5:
+        result['regime'] = 'trend'
+    elif has_trend and abs(ann_slope) > 3:
+        result['regime'] = 'trend'
+    elif is_mr:
+        result['regime'] = 'mean_reversion'
+    elif rv_20 > 50 and abs(ann_slope) > 8:
+        result['regime'] = 'trend'
+
+    return result
 
 
 class RegimeController:
@@ -104,36 +185,40 @@ class RegimeController:
 
 
 def detect_market_cycle(market_df, lookback=200):
-    """Detect long-term market cycle: bull/bear/range"""
-    if len(market_df) < 120:
+    """
+    改进版长周期市场状态检测 (bull/bear/range).
+    基于 OLS 趋势 + MA200 偏离 + 回撤深度.
+    """
+    if not isinstance(market_df, (pd.Series, pd.DataFrame)) or len(market_df) < 120:
         return 'range'
-    if isinstance(market_df['close'], pd.DataFrame):
-        close_series = market_df['close'].iloc[:, 0]
-    else:
-        close_series = market_df['close']
-    df_slice = pd.DataFrame({'close': close_series.iloc[-lookback:]})
-    returns = df_slice['close'].pct_change().dropna()
-    current_price = df_slice['close'].iloc[-1]
 
-    ma200 = df_slice['close'].rolling(200).mean().iloc[-1]
-    price_vs_ma200 = (current_price - ma200) / ma200 if ma200 > 0 else 0
+    close_values = _extract_close(market_df)
+    if len(close_values) < lookback:
+        return 'range'
+    close_values = close_values[-lookback:]
 
-    high_252 = df_slice['close'].rolling(252).max().iloc[-1]
-    drawdown = (high_252 - current_price) / high_252 if high_252 > 0 else 0
+    ann_slope, r2, t_stat, ann_vol = _ols_trend(close_values)
+    current_price = close_values[-1]
 
-    vol_20 = returns.tail(20).std() * np.sqrt(252)
-    vol_60 = returns.tail(60).std() * np.sqrt(252) if len(returns) >= 60 else vol_20
-    vol_ratio = vol_20 / vol_60 if vol_60 > 0 else 1.0
+    ma200 = np.mean(close_values)
+    price_vs_ma200 = (current_price - ma200) / ma200 if ma200 > 0 else 0.0
 
-    is_bull = (price_vs_ma200 > -0.05) and (drawdown < 0.12) and (vol_ratio < 1.3)
-    is_bear = (price_vs_ma200 < -0.05) or (drawdown > 0.15) or (vol_ratio > 1.5)
+    high_252 = np.max(close_values)
+    drawdown = (high_252 - current_price) / high_252 if high_252 > 0 else 0.0
+
+    returns = np.diff(np.log(close_values))
+    vol_20 = np.std(returns[-20:]) * np.sqrt(252) * 100 if len(returns) >= 20 else 0.0
+    vol_60 = ann_vol
+    vol_ratio = vol_20 / vol_60 if vol_60 > 5 else 1.0
+
+    is_bull = (t_stat > 1.5 and price_vs_ma200 > -0.03 and drawdown < 0.12 and vol_ratio < 1.4)
+    is_bear = (t_stat < -1.5) or (price_vs_ma200 < -0.08) or (drawdown > 0.18) or (vol_ratio > 1.6)
 
     if is_bull and not is_bear:
         return 'bull'
-    elif is_bear:
+    if is_bear:
         return 'bear'
-    else:
-        return 'range'
+    return 'range'
 
 
 class CycleController:

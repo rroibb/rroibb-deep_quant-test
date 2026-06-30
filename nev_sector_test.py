@@ -171,10 +171,7 @@ def run_nev_pipeline():
     xgb_models, xgb_scalers, _ = train_xgboost_models(panel, market_df)
 
     from models.fusion import MultiModalFusionModel
-    from models.nlp_sentiment import NLPSentimentAnalyzer
-    from models.llm_analyzer import LLMAnalyzer
-    all_models = {**dl_models, 'fusion': MultiModalFusionModel(),
-                  'nlp': NLPSentimentAnalyzer(), 'llm': LLMAnalyzer(use_mock=True)}
+    all_models = {**dl_models, 'fusion': MultiModalFusionModel()}
 
     # 回测
     print(f"\n{'='*60}\n  [5/6] 回测对比...\n{'='*60}")

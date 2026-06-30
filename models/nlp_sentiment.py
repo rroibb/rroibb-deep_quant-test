@@ -1,5 +1,6 @@
 import re
 import numpy as np
+import pandas as pd
 import torch
 import torch.nn as nn
 from transformers import AutoTokenizer, AutoModel
@@ -29,6 +30,9 @@ class NLPSentimentAnalyzer(BaseDeepModel):
             nn.Linear(256, 1),
         )
 
+        # 情感数据缓存
+        self._forum_data = None
+
     def forward(self, input_ids, attention_mask=None):
         if self.bert is not None:
             outputs = self.bert(input_ids=input_ids, attention_mask=attention_mask)
@@ -52,6 +56,49 @@ class NLPSentimentAnalyzer(BaseDeepModel):
                 score = self.forward(encoded['input_ids'], encoded['attention_mask'])
                 sentiments.append(float(score.numpy()))
         return np.array(sentiments)
+
+    def load_forum_sentiment(self, tickers, days=20, use_cache=True):
+        if use_cache and self._forum_data is not None:
+            return self._forum_data
+        try:
+            from sentiment_sources import fetch_all_sentiment_features
+            raw = fetch_all_sentiment_features(tickers, days)
+            self._forum_data = raw
+            return raw
+        except Exception as e:
+            print(f"  [NLP] 论坛情感加载失败: {e}")
+            return {}
+
+    def get_combined_sentiment(self, ticker, date, text_sentiment=0.0):
+        forum = self._forum_data or {}
+        df = forum.get(ticker)
+        if df is not None and not df.empty:
+            date = pd.Timestamp(date)
+            if date in df.index:
+                row = df.loc[date]
+            else:
+                row = df.iloc[-1] if len(df) > 0 else None
+
+            if row is not None:
+                forum_score = 0.0
+                n = 0
+                for col in ['composite_score', 'buy_desire', 'attention_index']:
+                    val = row.get(col)
+                    if val is not None and not (isinstance(val, float) and np.isnan(val)):
+                        forum_score += (float(val) / 50.0 - 1.0)
+                        n += 1
+                if n > 0:
+                    forum_score /= n
+                    return 0.6 * text_sentiment + 0.4 * forum_score
+        return text_sentiment
+
+    def predict_batch_combined(self, tickers, dates, texts):
+        bert_scores = self.predict_sentiment(texts)
+        self.load_forum_sentiment(tickers)
+        combined = []
+        for ticker, date, bs in zip(tickers, dates, bert_scores):
+            combined.append(self.get_combined_sentiment(ticker, date, bs))
+        return np.array(combined)
 
     def extract_news_keywords(self, texts):
         keywords = []

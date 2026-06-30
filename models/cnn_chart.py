@@ -1,6 +1,5 @@
 import torch
 import torch.nn as nn
-import numpy as np
 from .base import BaseDeepModel
 
 
@@ -8,6 +7,7 @@ class CNNChartPatternRecognizer(BaseDeepModel):
     def __init__(self, in_channels=5, num_classes=5):
         super().__init__(name='CNN_Chart')
         self.in_channels = in_channels
+        self.input_size = in_channels
         self.num_classes = num_classes
 
         self.conv_layers = nn.Sequential(
@@ -47,30 +47,4 @@ class CNNChartPatternRecognizer(BaseDeepModel):
             return score, pattern_probs
         return score
 
-    def extract_chart_features(self, stock_df, seq_len=60):
-        prices = stock_df['close'].values
-        volumes = stock_df['volume'].values if 'volume' in stock_df.columns else np.ones_like(prices)
 
-        if 'high' in stock_df.columns and 'low' in stock_df.columns:
-            highs = stock_df['high'].values
-            lows = stock_df['low'].values
-        else:
-            highs = prices * 1.02
-            lows = prices * 0.98
-
-        returns = np.diff(prices, prepend=prices[0]) / prices[0]
-
-        features = np.column_stack([
-            (prices - prices.mean()) / (prices.std() + 1e-8),
-            (volumes - volumes.mean()) / (volumes.std() + 1e-8),
-            returns,
-            (highs - prices) / (prices + 1e-8),
-            (prices - lows) / (prices + 1e-8),
-        ])
-
-        if len(features) < seq_len:
-            pad = np.zeros((seq_len - len(features), features.shape[1]))
-            features = np.vstack([pad, features])
-
-        features = features[-seq_len:]
-        return torch.from_numpy(features.astype(np.float32)).unsqueeze(0)

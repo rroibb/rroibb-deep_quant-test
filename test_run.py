@@ -169,14 +169,10 @@ def fast_test():
 
     # 6. 初始化融合模型
     from models.fusion import MultiModalFusionModel
-    from models.nlp_sentiment import NLPSentimentAnalyzer
-    from models.llm_analyzer import LLMAnalyzer
 
     fusion_model = MultiModalFusionModel()
-    nlp_model = NLPSentimentAnalyzer()
-    llm_model = LLMAnalyzer(use_mock=True)
 
-    all_models = {**dl_models, 'fusion': fusion_model, 'nlp': nlp_model, 'llm': llm_model}
+    all_models = {**dl_models, 'fusion': fusion_model}
 
     # 7. 回测对比 (使用最后6个月验证期，加速)
     print("\n限制回测区间到最后6个月...")
@@ -191,7 +187,7 @@ def fast_test():
 
     results = {}
     for mode_name, use_f, use_x, use_d in [
-        ('全模态融合 (DL+XGB+NLP+LLM)', True, True, True),
+        ('全模态融合 (DL+XGB)', True, True, True),
         ('纯深度学习 (LSTM+Transformer+CNN)', False, False, True),
         ('纯 XGBoost', False, True, False),
     ]:

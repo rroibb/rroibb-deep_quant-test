@@ -117,6 +117,7 @@ def train_model(model, train_loader, val_loader, epochs=EPOCHS, lr=LEARNING_RATE
 
 def train_all_deep_models(df_panel, market_df, seq_len=60):
     from data_layer import SequenceDataset
+    from features import SENTIMENT_FEATURES
 
     print(f"\n{'='*60}")
     print("训练深度学习模型")
@@ -127,9 +128,13 @@ def train_all_deep_models(df_panel, market_df, seq_len=60):
         lambda x: x.shift(-20) / x - 1
     )
 
-    df_panel, scaler = prepare_dl_panel(df_panel, TECHNICAL_FEATURES_DL)
-    input_size = len(TECHNICAL_FEATURES_DL)
-    print(f"输入特征维度: {input_size}")
+    # 动态检测情感特征列
+    sent_avail = [c for c in SENTIMENT_FEATURES if c in df_panel.columns]
+    feat_cols = TECHNICAL_FEATURES_DL + sent_avail
+
+    df_panel, scaler = prepare_dl_panel(df_panel, feat_cols)
+    input_size = len(feat_cols)
+    print(f"输入特征维度: {input_size} (技术 {len(TECHNICAL_FEATURES_DL)} + 情感 {len(sent_avail)})")
 
     all_dates = sorted(df_panel.index.get_level_values(0).unique())
     split_idx = int(len(all_dates) * 0.8)
@@ -139,8 +144,8 @@ def train_all_deep_models(df_panel, market_df, seq_len=60):
     train_panel = df_panel[df_panel.index.get_level_values(0).isin(train_dates)]
     val_panel = df_panel[df_panel.index.get_level_values(0).isin(val_dates)]
 
-    train_dataset = SequenceDataset(train_panel, seq_len, TECHNICAL_FEATURES_DL)
-    val_dataset = SequenceDataset(val_panel, seq_len, TECHNICAL_FEATURES_DL)
+    train_dataset = SequenceDataset(train_panel, seq_len, feat_cols)
+    val_dataset = SequenceDataset(val_panel, seq_len, feat_cols)
 
     if len(train_dataset) == 0 or len(val_dataset) == 0:
         print("数据集为空，跳过深度学习训练")
@@ -215,10 +220,12 @@ def train_xgboost_models(df_panel, market_df):
         'mean_reversion': {'n_estimators': 100, 'max_depth': 3, 'learning_rate': 0.05, 'subsample': 0.6, 'colsample_bytree': 0.6},
         'neutral': {'n_estimators': 100, 'max_depth': 3, 'learning_rate': 0.05, 'subsample': 0.7, 'colsample_bytree': 0.7},
     }
+    from features import SENTIMENT_FEATURES
+    sent_avail = [c for c in SENTIMENT_FEATURES if c in df_panel.columns]
     xgb_feats = {
-        'trend': ['Ret_20', 'Ret_60', 'Price_MA_60_Ratio', 'MA_20_60_Cross', 'Volatility_20', 'Amount_Ratio'],
-        'mean_reversion': ['Ret_5', 'Ret_10', 'RSI', 'BB_Position', 'VWAP_Dist', 'Price_Position', 'High_Low_Ratio'],
-        'neutral': TECHNICAL_FEATURES[:18],
+        'trend': ['Ret_20', 'Ret_60', 'Price_MA_60_Ratio', 'MA_20_60_Cross', 'Volatility_20', 'Amount_Ratio'] + sent_avail,
+        'mean_reversion': ['Ret_5', 'Ret_10', 'RSI', 'BB_Position', 'VWAP_Dist', 'Price_Position', 'High_Low_Ratio'] + sent_avail,
+        'neutral': TECHNICAL_FEATURES[:18] + sent_avail,
     }
 
     for regime in xgb_config:
@@ -228,8 +235,11 @@ def train_xgboost_models(df_panel, market_df):
             print(f"  {regime}: 样本不足({len(reg_data)}), 跳过")
             continue
 
-        X = reg_data[xgb_feats[regime]]
-        y = reg_data['Future_20d_Ret']
+        X = reg_data[xgb_feats[regime]].replace([np.inf, -np.inf], np.nan)
+        y = reg_data['Future_20d_Ret'].replace([np.inf, -np.inf], np.nan)
+        not_null = y.notna() & X.notna().all(axis=1)
+        X = X[not_null]
+        y = y[not_null]
         split_idx = int(len(X) * 0.8)
         X_tr, X_val = X.iloc[:split_idx], X.iloc[split_idx:]
         y_tr, y_val = y.iloc[:split_idx], y.iloc[split_idx:]

@@ -14,8 +14,6 @@ from data_layer import SequenceDataset
 from models import LSTMStockPredictor, TransformerStockPredictor, CNNChartPatternRecognizer
 from trainer import train_model, prepare_dl_panel, train_xgboost_models
 from models.fusion import MultiModalFusionModel
-from models.nlp_sentiment import NLPSentimentAnalyzer
-from models.llm_analyzer import LLMAnalyzer
 import torch
 
 # Load
@@ -76,8 +74,6 @@ xgb_models, xgb_scalers, _ = train_xgboost_models(panel, market_df)
 
 # Pick first 5 val days for verification
 fusion_model = MultiModalFusionModel()
-nlp_model = NLPSentimentAnalyzer()
-llm_model = LLMAnalyzer(use_mock=True)
 
 test_dates = val_dates[:30]  # need 30 for seq_len
 test_panel = panel.loc[test_dates[0]:test_dates[-1]]

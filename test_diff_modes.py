@@ -15,8 +15,6 @@ from models import LSTMStockPredictor, TransformerStockPredictor, CNNChartPatter
 from trainer import train_model, prepare_dl_panel, train_xgboost_models
 from backtest import DeepQuantBacktester
 from models.fusion import MultiModalFusionModel
-from models.nlp_sentiment import NLPSentimentAnalyzer
-from models.llm_analyzer import LLMAnalyzer
 from scipy import stats
 import torch
 
@@ -191,9 +189,7 @@ ten_panel = panel.loc[win_dates[0]:win_dates[-1]]
 ten_market = market_df.loc[win_dates[0]:win_dates[-1]]
 
 fusion_model = MultiModalFusionModel()
-nlp_model = NLPSentimentAnalyzer()
-llm_model = LLMAnalyzer(use_mock=True)
-all_models = {**dl_models, 'fusion': fusion_model, 'nlp': nlp_model, 'llm': llm_model}
+all_models = {**dl_models, 'fusion': fusion_model}
 
 bt = DeepQuantBacktester(ten_panel, ten_market, all_models, scaler,
                          xgb_models=xgb_models, xgb_scalers=xgb_scalers)
